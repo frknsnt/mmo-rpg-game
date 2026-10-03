@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Online RPG - Ultimate Battle Arena</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #222; user-select: none; font-family: 'Segoe UI', Tahoma, sans-serif; }
+        canvas { display: block; }
+        #scoreboard {
+            position: absolute; top: 20px; left: 20px;
+            color: white; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px;
+            border: 2px solid #444; min-width: 180px; pointer-events: none;
+        }
+        #scoreboard h3 { margin: 0 0 10px 0; font-size: 16px; color: #f1c40f; text-align: center; }
+        .score-item { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 5px; }
+        
+        /* İsim Giriş Modalı */
+        #name-modal {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(0,0,0,0.85); display: flex; justify-content: center; align-items: center; z-index: 10;
+        }
+        .modal-box {
+            background: #2c3e50; padding: 40px; border-radius: 12px; text-align: center;
+            border: 3px solid #f1c40f; box-shadow: 0 0 30px rgba(241,196,15,0.4);
+        }
+        .modal-box h2 { color: #f1c40f; margin-top: 0; }
+        .modal-box input { padding: 12px; font-size: 16px; border-radius: 6px; border: none; width: 220px; margin-bottom: 15px; text-align: center; }
+        .modal-box button { padding: 12px 25px; font-size: 16px; background: #27ae60; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .modal-box button:hover { background: #2ecc71; }
+
+        /* Ölüm Ekranı */
+        #death-screen {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(192, 57, 43, 0.8); display: none; justify-content: center; align-items: center; z-index: 5;
+            flex-direction: column; color: white;
+        }
+        #death-screen h1 { font-size: 60px; margin: 0 0 10px 0; text-shadow: 2px 2px 10px #000; }
+    </style>
+</head>
+<body>
+
+    <!-- İsim Sorma Ekranı -->
+    <div id="name-modal">
+        <div class="modal-box">
+            <h2>SAVAŞ ARENASI</h2>
+            <p style="color: #bdc3c7; margin-bottom: 20px;">Karakter adını gir ve savaşa başla!</p>
+            <input type="text" id="username-input" placeholder="Oyuncu Adı" maxlength="15" autofocus>
+            <br>
+            <button onclick="joinGame()">Savaşa Katıl</button>
+        </div>
+    </div>
+
+    <!-- Ölüm Ekranı -->
+    <div id="death-screen">
+        <h1>ÖLDÜNÜZ!</h1>
+        <p id="killer-text" style="font-size: 22px; margin-bottom: 20px;"></p>
+        <p style="font-size: 18px; color: #f1c40f;">Yeniden doğuluyor...</p>
+    </div>
+
+    <div id="scoreboard">
+        <h3>🏆 SKOR TABLOSU</h3>
+        <div id="scores-list">Yükleniyor...</div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script src="/socket.io/socket.io.js"></script>
+    
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        const socket = io(); 
+        
+        let allPlayers = {};
+        let myPlayer = { x: 400, y: 400, color: 'white', speed: 5, radius: 15, health: 100, kills: 0, weapon: 'normal', name: '' };
+        let walls = [];
+        
+        const projectiles = [];
+        let currentPowerUp = null;
+        let isShooting = false;
+        let fireRate = 150; 
+        let lastShotTime = 0;
+        let hitFlash = 0; 
+        let isDead = false;
+
+        const mouse = { x: canvas.width / 2, y: canvas.height / 2 };
+        window.addEventListener('mousemove', (e) => { mouse.x = e.clientX; mouse.y = e.clientY; });
+        window.addEventListener('mousedown', () => { if(!isDead) isShooting = true; });
+        window.addEventListener('mouseup', () => isShooting = false);
+
+        const keys = { w: false, a: false, s: false, d: false };
+        window.addEventListener('keydown', (e) => { if (keys.hasOwnProperty(e.key.toLowerCase())) keys[e.key.toLowerCase()] = true; });
+        window.addEventListener('keyup', (e) => { if (keys.hasOwnProperty(e.key.toLowerCase())) keys[e.key.toLowerCase()] = false; });
+
+        function joinGame() {
+            let nameInput = document.getElementById('username-input').value.trim();
+            if(nameInput === '') nameInput = 'Kahraman';
+            myPlayer.name = nameInput;
+            socket.emit('setPlayerName', nameInput);
+            document.getElementById('name-modal').style.display = 'none';
+        }
+
+        socket.on('initWalls', (serverWalls) => { walls = serverWalls; });
+
+        socket.on('currentPlayers', (players) => {
+            allPlayers = players;
+            if (players[socket.id]) {
+                myPlayer = { ...myPlayer, ...players[socket.id] };
+            }
+            updateScoreboard();
+        });
+
+        socket.on('newPlayer', (data) => { 
+            allPlayers[data.id] = data.player;
+            updateScoreboard();
+        });
+        
+        socket.on('playerMoved', (data) => {
+            if (allPlayers[data.id]) {
+                allPlayers[data.id].x = data.x;
+                allPlayers[data.id].y = data.y;
+            }
+        });
+
+        socket.on('playerShot', (bulletData) => { projectiles.push(bulletData); });
+
+        socket.on('updatePlayersData', (players) => {
+            allPlayers = players;
+            if (players[socket.id]) {
+                if (myPlayer.health > players[socket.id].health) {
+                    hitFlash = 10;
+                }
+                myPlayer = { ...myPlayer, ...players[socket.id] };
+            }
+            updateScoreboard();
+        });
+
+        // Öldüğümüzde tetiklenir
+        socket.on('playerDied', (killerName) => {
+            isDead = true;
+            isShooting = false;
+            document.getElementById('killer-text').innerText = `Seni vuran: ${killerName}`;
+            document.getElementById('death-screen').style.display = 'flex';
+            
+            setTimeout(() => {
+                document.getElementById('death-screen').style.display = 'none';
+                isDead = false;
+            }, 3000); // 3 saniye sonra yeniden canlan
+        });
+
+        socket.on('spawnPowerUp', (pData) => { currentPowerUp = pData; });
+        socket.on('removePowerUp', () => { currentPowerUp = null; });
+
+        socket.on('playerDisconnected', (id) => { 
+            delete allPlayers[id];
+            updateScoreboard();
+        });
+
+        function updateScoreboard() {
+            let html = '';
+            Object.keys(allPlayers).forEach(id => {
+                let p = allPlayers[id];
+                let isMe = (id === socket.id);
+                html += `<div class="score-item" style="${isMe ? 'color: #2ecc71; font-weight: bold;' : ''}">
+                    <span>${p.name || 'İsimsiz'}</span>
+                    <span>${p.kills} Kill</span>
+                </div>`;
+            });
+            document.getElementById('scores-list').innerHTML = html;
+        }
+
+        // Kutu Çarpışma Kontrolü (Duvarlar için)
+        function checkWallCollision(nextX, nextY, radius) {
+            for (let w of walls) {
+                if (nextX + radius > w.x && nextX - radius < w.x + w.w &&
+                    nextY + radius > w.y && nextY - radius < w.y + w.h) {
+                    return true; // Duvara çarptı
+                }
+            }
+            return false;
+        }
+
+        function drawPlayer(x, y, color, isMe, health, name, weapon) {
+            ctx.beginPath();
+            ctx.arc(x, y, myPlayer.radius, 0, Math.PI * 2, false);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = isMe ? '#2ecc71' : '#e74c3c'; 
+            ctx.stroke();
+
+            // Silah namlusu ve tür rengi
+            if (isMe) {
+                const angle = Math.atan2(mouse.y - y, mouse.x - x);
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+                ctx.lineTo(x + Math.cos(angle) * 30, y + Math.sin(angle) * 30);
+                ctx.strokeStyle = weapon === 'shotgun' ? '#e67e22' : (weapon === 'rapid' ? '#3498db' : '#bdc3c7');
+                ctx.lineWidth = weapon === 'shotgun' ? 10 : 8;
+                ctx.stroke();
+            }
+
+            // İsim ve Can Barı
+            ctx.fillStyle = 'white';
+            ctx.font = '13px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(name || 'İsimsiz', x, y - 38);
+
+            let currentHealth = (health !== undefined) ? health : 100;
+            ctx.fillStyle = '#e74c3c'; 
+            ctx.fillRect(x - 20, y - 30, 40, 6);
+            ctx.fillStyle = '#2ecc71'; 
+            ctx.fillRect(x - 20, y - 30, 40 * (currentHealth / 100), 6);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            ctx.fillStyle = 'rgba(34, 34, 34, 0.4)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Duvarları Çiz
+            ctx.fillStyle = '#34495e';
+            ctx.strokeStyle = '#2c3e50';
+            ctx.lineWidth = 4;
+            walls.forEach(w => {
+                ctx.fillRect(w.x, w.y, w.w, w.h);
+                ctx.strokeRect(w.x, w.y, w.w, w.h);
+            });
+
+            if (hitFlash > 0) {
+                ctx.fillStyle = `rgba(231, 76, 60, ${hitFlash / 20})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                hitFlash--;
+            }
+
+            // Güçlendirici / Silah Kutusu
+            if (currentPowerUp) {
+                ctx.fillStyle = currentPowerUp.type === 'shotgun' ? '#e67e22' : '#3498db';
+                ctx.fillRect(currentPowerUp.x - 14, currentPowerUp.y - 14, 28, 28);
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(currentPowerUp.x - 14, currentPowerUp.y - 14, 28, 28);
+
+                const dist = Math.hypot(myPlayer.x - currentPowerUp.x, myPlayer.y - currentPowerUp.y);
+                if (dist < myPlayer.radius + 14) {
+                    socket.emit('collectPowerUp', currentPowerUp.type);
+                }
+            }
+
+            // Hareket ve Duvar Engeli Kontrolü
+            if (!isDead) {
+                let nextX = myPlayer.x;
+                let nextY = myPlayer.y;
+                let moved = false;
+
+                if (keys.w && myPlayer.y > myPlayer.radius) nextY -= myPlayer.speed;
+                if (keys.s && myPlayer.y < canvas.height - myPlayer.radius) nextY += myPlayer.speed;
+                if (!checkWallCollision(nextX, nextY, myPlayer.radius)) {
+                    if(nextY !== myPlayer.y) { myPlayer.y = nextY; moved = true; }
+                }
+
+                if (keys.a && myPlayer.x > myPlayer.radius) nextX -= myPlayer.speed;
+                if (keys.d && myPlayer.x < canvas.width - myPlayer.radius) nextX += myPlayer.speed;
+                if (!checkWallCollision(nextX, myPlayer.y, myPlayer.radius)) {
+                    if(nextX !== myPlayer.x) { myPlayer.x = nextX; moved = true; }
+                }
+
+                if (moved) socket.emit('playerMovement', { x: myPlayer.x, y: myPlayer.y });
+
+                // Ateş Etme (Silah Türlerine Göre)
+                let currentFireRate = myPlayer.weapon === 'rapid' ? 70 : (myPlayer.weapon === 'shotgun' ? 400 : 150);
+                if (isShooting) {
+                    const currentTime = Date.now();
+                    if (currentTime - lastShotTime >= currentFireRate) {
+                        const angle = Math.atan2(mouse.y - myPlayer.y, mouse.x - myPlayer.x);
+                        
+                        // Pompalı tüfek ise 3'lü mermi atar
+                        let anglesToShoot = [angle];
+                        if (myPlayer.weapon === 'shotgun') {
+                            anglesToShoot = [angle - 0.2, angle, angle + 0.2];
+                        }
+
+                        anglesToShoot.forEach(a => {
+                            const velocity = { x: Math.cos(a) * 18, y: Math.sin(a) * 18 }; 
+                            const startX = myPlayer.x + Math.cos(a) * 30;
+                            const startY = myPlayer.y + Math.sin(a) * 30;
+
+                            const newBullet = { 
+                                x: startX, y: startY, 
+                                velocity: velocity, ownerId: socket.id 
+                            };
+                            
+                            projectiles.push(newBullet);
+                            socket.emit('shoot', newBullet);
+                        });
+
+                        lastShotTime = currentTime;
+                    }
+                }
+            }
+
+            // Mermileri Çiz ve Duvar Çarpışması
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const p = projectiles[i];
+                p.x += p.velocity.x;
+                p.y += p.velocity.y;
+
+                // Lazer Çizgisi
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y);
+                ctx.lineTo(p.x - p.velocity.x * 1.5, p.y - p.velocity.y * 1.5);
+                ctx.strokeStyle = '#f1c40f';
+                ctx.lineWidth = 4;
+                ctx.stroke();
+
+                let bulletRemoved = false;
+
+                // Duvara çarpan mermiyi yok et
+                for (let w of walls) {
+                    if (p.x > w.x && p.x < w.x + w.w && p.y > w.y && p.y < w.y + w.h) {
+                        projectiles.splice(i, 1);
+                        bulletRemoved = true;
+                        break;
+                    }
+                }
+                if (bulletRemoved) continue;
+
+                // Rakibe isabet kontrolü
+                if (p.ownerId === socket.id && !isDead) {
+                    Object.keys(allPlayers).forEach((id) => {
+                        if (id !== socket.id) {
+                            let enemy = allPlayers[id];
+                            const distance = Math.hypot(p.x - enemy.x, p.y - enemy.y);
+                            if (distance < myPlayer.radius + 5) {
+                                socket.emit('playerHit', { targetId: id });
+                                projectiles.splice(i, 1);
+                                bulletRemoved = true;
+                            }
+                        }
+                    });
+                } 
+
+                if (bulletRemoved) continue;
+
+                if (p.x < 0 || p.x > canvas.width || p.y < 0 || p.y > canvas.height) {
+                    projectiles.splice(i, 1);
+                }
+            }
+
+            // Diğer Oyuncuları Çiz
+            Object.keys(allPlayers).forEach((id) => {
+                let p = allPlayers[id];
+                let isMe = (id === socket.id);
+                if (!isMe) {
+                    drawPlayer(p.x, p.y, p.color, false, p.health, p.name, p.weapon);
+                }
+            });
+
+            if (!isDead) {
+                drawPlayer(myPlayer.x, myPlayer.y, myPlayer.color, true, myPlayer.health, myPlayer.name, myPlayer.weapon);
+            }
+        }
+
+        animate();
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+    </script>
+</body>
+</html>
